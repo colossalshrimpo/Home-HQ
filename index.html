@@ -157,6 +157,34 @@
       font-weight: 600;
     }
 
+    .check-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      border-bottom: 1px solid #eceff1;
+      padding: 14px 0;
+      cursor: pointer;
+    }
+
+    .check-row:last-child {
+      border-bottom: none;
+    }
+
+    .check-row input[type="checkbox"] {
+      width: 22px;
+      height: 22px;
+      min-width: 22px;
+      margin: 2px 0 0 0;
+      padding: 0;
+      accent-color: var(--blue-light);
+      cursor: pointer;
+    }
+
+    .check-row.done .item-title {
+      text-decoration: line-through;
+      opacity: 0.55;
+    }
+
     .message {
       padding: 12px;
       border-radius: 8px;
@@ -368,6 +396,22 @@
     </div>
 
     <div class="card">
+      <h2>Discussions</h2>
+
+      <div id="discussions" class="loading">
+        Loading discussions...
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Meals</h2>
+
+      <div id="meals" class="loading">
+        Loading meals...
+      </div>
+    </div>
+
+    <div class="card">
       <h2>Household Inbox</h2>
 
       <div id="inbox" class="loading">
@@ -423,6 +467,8 @@
     function renderDashboard(data) {
       renderTasks(data.tasks || []);
       renderShopping(data.shopping || []);
+      renderDiscussions(data.discussions || []);
+      renderMeals(data.meals || []);
       renderInbox(data.inbox || []);
     }
 
@@ -512,6 +558,156 @@
       `)
       .join('');
   }
+
+    const CLOSED_DISCUSSION_STATUSES =
+      ['resolved', 'discussed', 'completed', 'dismissed'];
+
+    const CLOSED_MEAL_STATUSES =
+      ['completed', 'cooked', 'done', 'dismissed'];
+
+    // Discussions columns: ID, Topic, Added by, Date added, Status,
+    // Decision/Notes, Parent Inbox ID
+    function renderDiscussions(items) {
+      const container =
+        document.getElementById('discussions');
+
+      const open = items.filter(item => {
+        return !CLOSED_DISCUSSION_STATUSES.includes(
+          String(item[4] || '').trim().toLowerCase()
+        );
+      });
+
+      if (open.length === 0) {
+        container.innerHTML =
+          '<p>No open discussions.</p>';
+
+        return;
+      }
+
+      container.innerHTML = open
+        .map(item => `
+          <label class="check-row">
+            <input
+              type="checkbox"
+              onchange="completeDiscussion(
+                '${escapeAttribute(item[0])}',
+                this
+              )"
+            >
+
+            <div>
+              <div class="item-title">
+                ${escapeHtml(item[1])}
+              </div>
+
+              <div class="item-details">
+                Added by
+                ${escapeHtml(item[2] || 'Unspecified')}
+                · ${escapeHtml(item[4] || 'Needs Discussion')}
+              </div>
+            </div>
+          </label>
+        `)
+        .join('');
+    }
+
+    // Meals columns: ID, Meal, Planned date, Ingredients Needed,
+    // Notes, Status, Parent Inbox ID
+    function renderMeals(items) {
+      const container =
+        document.getElementById('meals');
+
+      const open = items.filter(item => {
+        return !CLOSED_MEAL_STATUSES.includes(
+          String(item[5] || '').trim().toLowerCase()
+        );
+      });
+
+      if (open.length === 0) {
+        container.innerHTML =
+          '<p>No meals planned.</p>';
+
+        return;
+      }
+
+      container.innerHTML = open
+        .map(item => {
+          const details = [
+            item[2] ? 'Planned ' + item[2] : '',
+            item[3] ? 'Needs: ' + item[3] : '',
+            item[5] || 'Idea'
+          ].filter(Boolean);
+
+          return `
+            <label class="check-row">
+              <input
+                type="checkbox"
+                onchange="completeMeal(
+                  '${escapeAttribute(item[0])}',
+                  this
+                )"
+              >
+
+              <div>
+                <div class="item-title">
+                  ${escapeHtml(item[1])}
+                </div>
+
+                <div class="item-details">
+                  ${escapeHtml(details.join(' · '))}
+                </div>
+              </div>
+            </label>
+          `;
+        })
+        .join('');
+    }
+
+    function completeDiscussion(discussionId, checkbox) {
+      checkbox.disabled = true;
+      checkbox.closest('.check-row').classList.add('done');
+
+      callPost('updateDiscussionStatus', {
+        discussionId,
+        status: 'Resolved'
+      })
+        .then(loadDashboard)
+        .catch(error => {
+          checkbox.disabled = false;
+          checkbox.checked = false;
+          checkbox.closest('.check-row').classList.remove('done');
+
+          alert(
+            getErrorMessage(
+              error,
+              'Unable to update the discussion.'
+            )
+          );
+        });
+    }
+
+    function completeMeal(mealId, checkbox) {
+      checkbox.disabled = true;
+      checkbox.closest('.check-row').classList.add('done');
+
+      callPost('updateMealStatus', {
+        mealId,
+        status: 'Completed'
+      })
+        .then(loadDashboard)
+        .catch(error => {
+          checkbox.disabled = false;
+          checkbox.checked = false;
+          checkbox.closest('.check-row').classList.remove('done');
+
+          alert(
+            getErrorMessage(
+              error,
+              'Unable to update the meal.'
+            )
+          );
+        });
+    }
 
     function renderInbox(items) {
       const container =
@@ -799,6 +995,16 @@
         'shopping'
       ).innerHTML =
         '<p>Unable to load shopping data.</p>';
+
+      document.getElementById(
+        'discussions'
+      ).innerHTML =
+        '<p>Unable to load discussions.</p>';
+
+      document.getElementById(
+        'meals'
+      ).innerHTML =
+        '<p>Unable to load meals.</p>';
 
       document.getElementById(
         'inbox'
