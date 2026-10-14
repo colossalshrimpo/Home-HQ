@@ -1,7 +1,11 @@
 <!DOCTYPE html>
 <html>
 <head>
+  <meta charset="utf-8">
   <base target="_top">
+
+  <link rel="preconnect" href="https://script.google.com">
+  <link rel="preconnect" href="https://script.googleusercontent.com" crossorigin>
 
   <meta
     name="viewport"
@@ -180,6 +184,38 @@
       cursor: pointer;
     }
 
+    .item,
+    .check-row {
+      transition: opacity 0.22s ease, transform 0.22s ease;
+    }
+
+    .item.leaving,
+    .check-row.leaving {
+      opacity: 0;
+      transform: translateX(10px);
+    }
+
+    .sync-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin: -6px 0 16px 0;
+      font-size: 14px;
+      color: var(--text-sub);
+    }
+
+    .sync-row button {
+      width: auto;
+      margin: 0;
+      padding: 3px 12px;
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--blue-dark);
+      background: transparent;
+      border: 1px solid var(--blue-light);
+      border-radius: 999px;
+    }
+
     .check-row.done .item-title {
       text-decoration: line-through;
       opacity: 0.55;
@@ -306,6 +342,11 @@
     <p class="subtitle">
       Tasks, shopping, and household thoughts in one place.
     </p>
+
+    <div class="sync-row">
+      <span id="syncStatus" aria-live="polite"></span>
+      <button type="button" onclick="loadDashboard(true)">Refresh</button>
+    </div>
 
   <div class="card">
   <h2>Quick Add</h2>
@@ -469,8 +510,12 @@
     // Paste your Apps Script Web App /exec URL here after deploying WebApi.gs:
     const APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbyb7Qv3YKBswD1DkFSXmFjiXDC5UuOaRzfxK91kWRDvS3CJPdvY8uS5-PUnMjDPEYh1/exec';
 
-    function callGet(action) {
-      return fetch(`${APPS_SCRIPT_URL}?action=${encodeURIComponent(action)}`)
+    function callGet(action, extraParams) {
+      const query = new URLSearchParams(
+        Object.assign({ action }, extraParams || {})
+      ).toString();
+
+      return fetch(`${APPS_SCRIPT_URL}?${query}`)
         .then(res => res.json())
         .then(data => {
           if (data && data.error) throw new Error(data.error);
@@ -492,15 +537,129 @@
         });
     }
 
-    document.addEventListener(
-      'DOMContentLoaded',
-      loadDashboard
-    );
+    // ---- Fast loading: show saved data first, refresh quietly ----------
+    const CACHE_KEY = 'hhq_dashboard_v2';
+    let dashboardState = null;
+    let pendingWrites = 0;
 
-    function loadDashboard() {
-      callGet('getDashboardData')
-        .then(renderDashboard)
-        .catch(showLoadError);
+    function readSavedDashboard() {
+      try {
+        const raw = localStorage.getItem(CACHE_KEY);
+        const saved = raw ? JSON.parse(raw) : null;
+        return saved && saved.data ? saved : null;
+      } catch (error) {
+        return null;
+      }
+    }
+
+    function saveDashboardLocally() {
+      try {
+        localStorage.setItem(
+          CACHE_KEY,
+          JSON.stringify({ savedAt: Date.now(), data: dashboardState })
+        );
+      } catch (error) {
+        // Storage can be unavailable (private window); the page still works.
+      }
+    }
+
+    function setSyncStatus(text) {
+      const element = document.getElementById('syncStatus');
+      if (element) element.textContent = text;
+    }
+
+    function timeLabel(date) {
+      return date.toLocaleTimeString([], {
+        hour: 'numeric',
+        minute: '2-digit'
+      });
+    }
+
+    function initDashboard() {
+      const saved = readSavedDashboard();
+
+      if (saved) {
+        dashboardState = saved.data;
+        renderDashboard(dashboardState);
+        setSyncStatus(
+          'Saved ' + timeLabel(new Date(saved.savedAt)) + ' · refreshing…'
+        );
+      }
+
+      loadDashboard();
+    }
+
+    document.addEventListener('DOMContentLoaded', initDashboard);
+
+    function loadDashboard(options) {
+      const fresh =
+        options === true || (options && options.fresh === true);
+
+      if (dashboardState) {
+        setSyncStatus('Refreshing…');
+      }
+
+      return callGet('getDashboardData', fresh ? { fresh: '1' } : {})
+        .then(data => {
+          // A save is still in flight; its result will be newer than this.
+          if (pendingWrites > 0) return;
+
+          const changed =
+            JSON.stringify(data) !== JSON.stringify(dashboardState);
+
+          dashboardState = data;
+          saveDashboardLocally();
+
+          if (changed) renderDashboard(data);
+
+          setSyncStatus('Updated ' + timeLabel(new Date()));
+        })
+        .catch(error => {
+          if (dashboardState) {
+            setSyncStatus('Offline · showing saved data');
+            console.error(error);
+          } else {
+            showLoadError(error);
+          }
+        });
+    }
+
+    // Updates the screen immediately, then saves in the background.
+    function fadeOut(element) {
+      if (element) element.classList.add('leaving');
+    }
+
+    function eventRow() {
+      const target = window.event && window.event.target;
+      return target && target.closest
+        ? target.closest('.item, .check-row')
+        : null;
+    }
+
+    function optimisticChange(applyChange, rerender, action, params, errorText) {
+      const row = eventRow();
+      fadeOut(row);
+
+      setTimeout(() => {
+        if (!dashboardState) return;
+        applyChange(dashboardState);
+        rerender(dashboardState);
+        saveDashboardLocally();
+      }, row ? 220 : 0);
+
+      pendingWrites++;
+      setSyncStatus('Saving…');
+
+      return callPost(action, params)
+        .then(() => {
+          pendingWrites--;
+          setSyncStatus('Saved ' + timeLabel(new Date()));
+        })
+        .catch(error => {
+          pendingWrites--;
+          alert(getErrorMessage(error, errorText));
+          return loadDashboard(true);
+        });
     }
 
     function renderDashboard(data) {
@@ -707,46 +866,32 @@
       checkbox.disabled = true;
       checkbox.closest('.check-row').classList.add('done');
 
-      callPost('updateDiscussionStatus', {
-        discussionId,
-        status: 'Resolved'
-      })
-        .then(loadDashboard)
-        .catch(error => {
-          checkbox.disabled = false;
-          checkbox.checked = false;
-          checkbox.closest('.check-row').classList.remove('done');
-
-          alert(
-            getErrorMessage(
-              error,
-              'Unable to update the discussion.'
-            )
-          );
-        });
+      optimisticChange(
+        state => {
+          const row = (state.discussions || []).find(r => r[0] === discussionId);
+          if (row) row[4] = 'Resolved';
+        },
+        state => renderDiscussions(state.discussions || []),
+        'updateDiscussionStatus',
+        { discussionId, status: 'Resolved' },
+        'Unable to update the discussion.'
+      );
     }
 
     function completeMeal(mealId, checkbox) {
       checkbox.disabled = true;
       checkbox.closest('.check-row').classList.add('done');
 
-      callPost('updateMealStatus', {
-        mealId,
-        status: 'Completed'
-      })
-        .then(loadDashboard)
-        .catch(error => {
-          checkbox.disabled = false;
-          checkbox.checked = false;
-          checkbox.closest('.check-row').classList.remove('done');
-
-          alert(
-            getErrorMessage(
-              error,
-              'Unable to update the meal.'
-            )
-          );
-        });
+      optimisticChange(
+        state => {
+          const row = (state.meals || []).find(r => r[0] === mealId);
+          if (row) row[5] = 'Completed';
+        },
+        state => renderMeals(state.meals || []),
+        'updateMealStatus',
+        { mealId, status: 'Completed' },
+        'Unable to update the meal.'
+      );
     }
 
     let reviewQueue = [];
@@ -756,6 +901,17 @@
     function renderReview(items) {
       const container =
         document.getElementById('review');
+
+      // Remember anything typed so a refresh never wipes it.
+      const typed = {};
+      container.querySelectorAll('.review-item[data-id]').forEach(el => {
+        typed[el.dataset.id] = {
+          items: el.querySelector('textarea[id^="rv-items-"]').value,
+          dest: el.querySelector('select').value,
+          note: el.querySelector('textarea[id^="rv-note-"]').value,
+          ask: el.querySelector('input[type="checkbox"]').checked
+        };
+      });
 
       reviewQueue = items
         .filter(item => item[4] === 'Needs Review')
@@ -798,7 +954,7 @@
 
       container.innerHTML = reviewQueue
         .map((entry, i) => `
-          <div class="item review-item">
+          <div class="item review-item" data-id="${escapeHtml(entry.id)}">
             <div class="item-title">
               ${escapeHtml(entry.entry)}
             </div>
@@ -855,6 +1011,15 @@
           </div>
         `)
         .join('');
+
+      reviewQueue.forEach((entry, i) => {
+        const keep = typed[entry.id];
+        if (!keep) return;
+        document.getElementById('rv-items-' + i).value = keep.items;
+        document.getElementById('rv-dest-' + i).value = keep.dest;
+        document.getElementById('rv-note-' + i).value = keep.note;
+        document.getElementById('rv-ask-' + i).checked = keep.ask;
+      });
     }
 
     function submitReview(index) {
@@ -888,7 +1053,21 @@
         .then(result => {
           message.className = 'message success';
           message.textContent = result.message || 'Done.';
-          loadDashboard();
+
+          // Close the card right away; the quiet refresh fills in the rest.
+          if (dashboardState) {
+            const row = (dashboardState.inbox || []).find(r => r[0] === entry.id);
+            if (row && !askClaude) row[4] = 'Processed';
+            saveDashboardLocally();
+          }
+
+          setTimeout(() => {
+            if (dashboardState) {
+              renderReview(dashboardState.inbox || []);
+              renderInbox(dashboardState.inbox || []);
+            }
+            loadDashboard(true);
+          }, askClaude ? 0 : 600);
         })
         .catch(error => {
           message.className = 'message error';
@@ -1080,7 +1259,7 @@
 
           button.disabled = false;
 
-          loadDashboard();
+          loadDashboard(true);
         })
         .catch(error => {
           message.className =
@@ -1097,37 +1276,29 @@
     }
 
     function completeTask(taskId) {
-      callPost('updateTaskStatus', {
-        taskId,
-        status: 'Completed'
-      })
-        .then(loadDashboard)
-        .catch(error => {
-          alert(
-            getErrorMessage(
-              error,
-              'Unable to update the task.'
-            )
-          );
-        });
+      optimisticChange(
+        state => {
+          const row = (state.tasks || []).find(r => r[0] === taskId);
+          if (row) row[5] = 'Completed';
+        },
+        state => renderTasks(state.tasks || []),
+        'updateTaskStatus',
+        { taskId, status: 'Completed' },
+        'Unable to update the task.'
+      );
     }
 
     function completeShoppingItem(itemId) {
-      callPost('updateShoppingStatus', {
-        itemId,
-        purchased: true
-      })
-        .then(() => {
-          loadDashboard();
-        })
-        .catch(error => {
-          alert(
-            getErrorMessage(
-              error,
-              'Unable to update the shopping item.'
-            )
-          );
-        });
+      optimisticChange(
+        state => {
+          const row = (state.shopping || []).find(r => r[0] === itemId);
+          if (row) row[5] = 'TRUE';
+        },
+        state => renderShopping(state.shopping || []),
+        'updateShoppingStatus',
+        { itemId, purchased: true },
+        'Unable to update the shopping item.'
+      );
     }
 
     function syncCalendar() {
@@ -1163,7 +1334,7 @@
 
           button.disabled = false;
 
-          loadDashboard();
+          loadDashboard(true);
         })
         .catch(error => {
           message.className =
@@ -1250,7 +1421,7 @@
         .then(result => {
           message.className = 'message success';
           message.textContent = result.message;
-          loadDashboard();
+          loadDashboard(true);
         })
         .catch(error => {
           message.className = 'message error';
