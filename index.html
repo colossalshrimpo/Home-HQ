@@ -185,6 +185,37 @@
       opacity: 0.55;
     }
 
+    .review-item textarea,
+    .review-item select {
+      margin-top: 6px;
+      margin-bottom: 6px;
+    }
+
+    .review-item label.field-label {
+      display: block;
+      margin-top: 8px;
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--blue-dark);
+    }
+
+    .review-item .review-submit {
+      background: var(--orange-dark);
+      color: white;
+      border: none;
+    }
+
+    .review-flag {
+      display: inline-block;
+      margin-top: 6px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      background: #fff1dc;
+      color: #8a4b00;
+      font-size: 14px;
+      font-weight: 600;
+    }
+
     .message {
       padding: 12px;
       border-radius: 8px;
@@ -412,6 +443,14 @@
     </div>
 
     <div class="card">
+      <h2>Needs Review</h2>
+
+      <div id="review" class="loading">
+        Loading review queue...
+      </div>
+    </div>
+
+    <div class="card">
       <h2>Household Inbox</h2>
 
       <div id="inbox" class="loading">
@@ -469,6 +508,7 @@
       renderShopping(data.shopping || []);
       renderDiscussions(data.discussions || []);
       renderMeals(data.meals || []);
+      renderReview(data.inbox || []);
       renderInbox(data.inbox || []);
     }
 
@@ -709,6 +749,155 @@
         });
     }
 
+    let reviewQueue = [];
+
+    // Inbox columns: A ID, B Date, C Submitted by, D Entry, E Status,
+    // F blank, ..., N (index 13) AI Reasoning
+    function renderReview(items) {
+      const container =
+        document.getElementById('review');
+
+      reviewQueue = items
+        .filter(item => item[4] === 'Needs Review')
+        .map(item => {
+          let reasoning = String(item[13] || '');
+          let flaggedNote = '';
+
+          if (reasoning.startsWith('ASK CLAUDE:')) {
+            const parts = reasoning.slice('ASK CLAUDE:'.length).split(' || ');
+            flaggedNote = (parts.shift() || '').trim();
+            reasoning = parts.join(' || ');
+          }
+
+          // Partly-processed entries list the held pieces in quotes.
+          let held = [];
+          if (reasoning.startsWith('HELD FOR REVIEW:')) {
+            const heldText = reasoning
+              .slice('HELD FOR REVIEW:'.length)
+              .split('Already created:')[0];
+
+            held = [...heldText.matchAll(/"([^"]+)"/g)].map(m => m[1]);
+          }
+
+          return {
+            id: item[0],
+            entry: item[3],
+            by: item[2],
+            reasoning,
+            flaggedNote,
+            prefill: held.length ? held.join('\n') : item[3]
+          };
+        });
+
+      if (reviewQueue.length === 0) {
+        container.innerHTML =
+          '<p>Nothing needs review.</p>';
+
+        return;
+      }
+
+      container.innerHTML = reviewQueue
+        .map((entry, i) => `
+          <div class="item review-item">
+            <div class="item-title">
+              ${escapeHtml(entry.entry)}
+            </div>
+
+            <div class="item-details">
+              Added by ${escapeHtml(entry.by || 'Unspecified')}
+            </div>
+
+            ${entry.reasoning
+              ? `<div class="item-details">${escapeHtml(entry.reasoning)}</div>`
+              : ''}
+
+            ${entry.flaggedNote
+              ? `<div class="review-flag">Flagged for Claude: ${escapeHtml(entry.flaggedNote)}</div>`
+              : ''}
+
+            <label class="field-label" for="rv-items-${i}">
+              Items to add (one per line)
+            </label>
+            <textarea id="rv-items-${i}" rows="2">${escapeHtml(entry.prefill)}</textarea>
+
+            <label class="field-label" for="rv-dest-${i}">
+              Where should it go?
+            </label>
+            <select id="rv-dest-${i}">
+              <option value="Task">Task</option>
+              <option value="Shopping">Shopping</option>
+              <option value="Discussion">Discussion</option>
+              <option value="Meal">Meal</option>
+              <option value="Dismiss">Dismiss (nothing to add)</option>
+            </select>
+
+            <label class="field-label" for="rv-note-${i}">
+              Why? (helps the system learn)
+            </label>
+            <textarea id="rv-note-${i}" rows="2"
+              placeholder="e.g. An oil change is a car-maintenance task"></textarea>
+
+            <label class="checkbox-row">
+              <input id="rv-ask-${i}" type="checkbox">
+              <span>Ask Claude to look at this instead</span>
+            </label>
+
+            <button
+              type="button"
+              class="review-submit"
+              id="rv-btn-${i}"
+              onclick="submitReview(${i})"
+            >
+              Sort it
+            </button>
+
+            <div id="rv-msg-${i}" class="message"></div>
+          </div>
+        `)
+        .join('');
+    }
+
+    function submitReview(index) {
+      const entry = reviewQueue[index];
+
+      if (!entry) {
+        return;
+      }
+
+      const button = document.getElementById('rv-btn-' + index);
+      const message = document.getElementById('rv-msg-' + index);
+
+      const askClaude =
+        document.getElementById('rv-ask-' + index).checked;
+
+      message.style.display = 'block';
+      message.className = 'message';
+      message.textContent = askClaude ? 'Flagging...' : 'Sorting...';
+      button.disabled = true;
+
+      callPost('resolveReviewItem', {
+        inboxId: entry.id,
+        destination:
+          document.getElementById('rv-dest-' + index).value,
+        items:
+          document.getElementById('rv-items-' + index).value,
+        note:
+          document.getElementById('rv-note-' + index).value,
+        askClaude
+      })
+        .then(result => {
+          message.className = 'message success';
+          message.textContent = result.message || 'Done.';
+          loadDashboard();
+        })
+        .catch(error => {
+          message.className = 'message error';
+          message.textContent =
+            getErrorMessage(error, 'Unable to sort this entry.');
+          button.disabled = false;
+        });
+    }
+
     function renderInbox(items) {
       const container =
         document.getElementById('inbox');
@@ -716,6 +905,7 @@
       const activeItems = items.filter(item => {
         return (
           item[4] !== 'Processed' &&
+          item[4] !== 'Needs Review' &&
           item[4] !== 'Dismissed'
         );
       });
@@ -739,6 +929,10 @@
               ${escapeHtml(item[2] || 'Unspecified')}
               · ${escapeHtml(item[4] || 'New')}
             </div>
+
+            ${item[4] === 'Needs Review' && item[13]
+              ? `<div class="item-details">${escapeHtml(item[13])}</div>`
+              : ''}
           </div>
         `)
         .join('');
@@ -1005,6 +1199,11 @@
         'meals'
       ).innerHTML =
         '<p>Unable to load meals.</p>';
+
+      document.getElementById(
+        'review'
+      ).innerHTML =
+        '<p>Unable to load the review queue.</p>';
 
       document.getElementById(
         'inbox'
