@@ -332,6 +332,22 @@
         gap: 0;
       }
     }
+    .chips { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:10px; }
+    .chip { width:auto; margin:0; padding:6px 14px; border-radius:999px; font-size:0.85rem;
+      background:transparent; color:var(--blue-dark); border:1px solid var(--blue-dark); box-shadow:none; }
+    .chip.active { background:var(--blue-dark); color:#fff; font-weight:600; }
+    .assign-select { width:auto; margin:6px 0 0; font-size:0.85rem; padding:6px 8px; }
+    .meal-item { border-bottom:1px solid var(--gray); padding-bottom:6px; }
+    .meal-extra { display:flex; gap:6px; margin:4px 0 4px 30px; flex-wrap:wrap; }
+    .meal-extra input { flex:1; min-width:150px; margin:0; font-size:0.85rem; padding:6px 8px; }
+    .meal-extra button { width:auto; margin:0; padding:6px 12px; font-size:0.85rem; }
+    #lockScreen { position:fixed; inset:0; z-index:9999; display:none; align-items:center;
+      justify-content:center; background:rgba(31,42,51,.75); padding:16px; }
+    #lockScreen.show { display:flex; }
+    #lockScreen .lock-box { background:#fff; color:var(--text-main); padding:24px; border-radius:16px;
+      max-width:340px; width:100%; text-align:center; box-shadow:0 8px 30px rgba(0,0,0,.3); }
+    #lockScreen input { width:100%; box-sizing:border-box; margin:12px 0 8px; }
+    #lockError { color:#c0392b; font-size:.85rem; min-height:1.2em; }
   </style>
 </head>
 
@@ -506,21 +522,59 @@
 
 <div id="processingMessage" class="message"></div>
 
+<div id="lockScreen" role="dialog" aria-modal="true" aria-labelledby="lockTitle">
+  <form class="lock-box" onsubmit="return submitPasscode(event)">
+    <h2 id="lockTitle">Household HQ</h2>
+    <p>Enter the household passcode.</p>
+    <input type="password" id="lockInput" autocomplete="current-password" placeholder="Passcode">
+    <div id="lockError"></div>
+    <button type="submit">Unlock</button>
+  </form>
+</div>
+
   <script>
     // Paste your Apps Script Web App /exec URL here after deploying WebApi.gs:
     const APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbyb7Qv3YKBswD1DkFSXmFjiXDC5UuOaRzfxK91kWRDvS3CJPdvY8uS5-PUnMjDPEYh1/exec';
 
-    function callGet(action, extraParams) {
-      const query = new URLSearchParams(
-        Object.assign({ action }, extraParams || {})
-      ).toString();
+    // ---- Passcode ----------------------------------------------------
+    function getKey() {
+      try { return localStorage.getItem('hhq_key') || ''; } catch (e) { return ''; }
+    }
 
-      return fetch(`${APPS_SCRIPT_URL}?${query}`)
-        .then(res => res.json())
-        .then(data => {
-          if (data && data.error) throw new Error(data.error);
-          return data;
-        });
+    function showLockScreen(message) {
+      const screen = document.getElementById('lockScreen');
+      if (!screen) return;
+      screen.classList.add('show');
+      document.getElementById('lockError').textContent = message || '';
+      const input = document.getElementById('lockInput');
+      input.value = '';
+      setTimeout(() => input.focus(), 50);
+    }
+
+    function submitPasscode(event) {
+      event.preventDefault();
+      const value = document.getElementById('lockInput').value;
+      try { localStorage.setItem('hhq_key', value); } catch (e) {}
+      document.getElementById('lockScreen').classList.remove('show');
+      loadDashboard(true);
+      return false;
+    }
+
+    function handleResponse(data) {
+      if (data && data.error) {
+        const error = new Error(data.error);
+        if (data.code === 'unauthorized') {
+          error.unauthorized = true;
+          showLockScreen(getKey() ? 'That passcode did not match.' : '');
+        }
+        throw error;
+      }
+      return data;
+    }
+
+    // Reads also go through POST so the passcode never appears in a URL.
+    function callGet(action, extraParams) {
+      return callPost(action, extraParams || {});
     }
 
     function callPost(action, params) {
@@ -528,13 +582,10 @@
       return fetch(APPS_SCRIPT_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify({ action, params })
+        body: JSON.stringify({ action, params, key: getKey() })
       })
         .then(res => res.json())
-        .then(data => {
-          if (data && data.error) throw new Error(data.error);
-          return data;
-        });
+        .then(handleResponse);
     }
 
     // ---- Fast loading: show saved data first, refresh quietly ----------
@@ -599,7 +650,7 @@
         setSyncStatus('Refreshing…');
       }
 
-      return callGet('getDashboardData', fresh ? { fresh: '1' } : {})
+      return callGet('getDashboardData', fresh ? { fresh: true } : {})
         .then(data => {
           // A save is still in flight; its result will be newer than this.
           if (pendingWrites > 0) return;
@@ -615,7 +666,9 @@
           setSyncStatus('Updated ' + timeLabel(new Date()));
         })
         .catch(error => {
-          if (dashboardState) {
+          if (error.unauthorized) {
+            setSyncStatus('Locked');
+          } else if (dashboardState) {
             setSyncStatus('Offline · showing saved data');
             console.error(error);
           } else {
@@ -636,8 +689,8 @@
         : null;
     }
 
-    function optimisticChange(applyChange, rerender, action, params, errorText) {
-      const row = eventRow();
+    function optimisticChange(applyChange, rerender, action, params, errorText, options) {
+      const row = options && options.fade === false ? null : eventRow();
       fadeOut(row);
 
       setTimeout(() => {
@@ -657,7 +710,7 @@
         })
         .catch(error => {
           pendingWrites--;
-          alert(getErrorMessage(error, errorText));
+          if (!error.unauthorized) alert(getErrorMessage(error, errorText));
           return loadDashboard(true);
         });
     }
@@ -671,11 +724,46 @@
       renderInbox(data.inbox || []);
     }
 
+    const PEOPLE = ['Unassigned', 'Alex', 'Joshua', 'Both'];
+
+    function getTaskFilter() {
+      try { return localStorage.getItem('hhq_task_filter') || 'Everyone'; }
+      catch (e) { return 'Everyone'; }
+    }
+
+    function setTaskFilter(value) {
+      try { localStorage.setItem('hhq_task_filter', value); } catch (e) {}
+      if (dashboardState) renderTasks(dashboardState.tasks || []);
+    }
+
+    function taskMatchesFilter(task, filter) {
+      const owner = String(task[3] || '').trim() || 'Unassigned';
+      if (filter === 'Everyone') return true;
+      if (filter === 'Unassigned') return owner === 'Unassigned';
+      return owner === filter || owner === 'Both';
+    }
+
+    function changeAssignee(taskId, assignee) {
+      optimisticChange(
+        state => {
+          const row = (state.tasks || []).find(r => r[0] === taskId);
+          if (row) row[3] = assignee;
+        },
+        state => renderTasks(state.tasks || []),
+        'updateTaskAssignee',
+        { taskId, assignee },
+        'Unable to assign the task.',
+        { fade: false }
+      );
+    }
+
     function renderTasks(tasks) {
       const container =
         document.getElementById('tasks');
 
-      const openTasks = tasks.filter(task => {
+      const filter = getTaskFilter();
+
+      const allOpen = tasks.filter(task => {
         const status = task[5];
 
         return (
@@ -684,14 +772,24 @@
         );
       });
 
+      const openTasks = allOpen.filter(task => taskMatchesFilter(task, filter));
+
+      const chips = '<div class="chips">' +
+        ['Everyone', 'Alex', 'Joshua', 'Unassigned']
+          .map(name => `<button type="button" class="chip${name === filter ? ' active' : ''}"
+            onclick="setTaskFilter('${name}')">${name}</button>`)
+          .join('') +
+        '</div>';
+
       if (openTasks.length === 0) {
         container.innerHTML =
-          '<p>No open tasks.</p>';
+          chips + '<p>No open tasks' +
+          (filter === 'Everyone' ? '.' : ' for ' + escapeHtml(filter) + '.') + '</p>';
 
         return;
       }
 
-      container.innerHTML = openTasks
+      container.innerHTML = chips + openTasks
         .map(task => `
           <div class="item">
             <div class="item-title">
@@ -700,9 +798,16 @@
 
             <div class="item-details">
               ${escapeHtml(task[2] || 'Other')}
-              · ${escapeHtml(task[3] || 'Unassigned')}
               · ${escapeHtml(task[5] || 'Not Started')}
             </div>
+
+            <select class="assign-select" aria-label="Assigned to"
+              onchange="changeAssignee('${escapeAttribute(task[0])}', this.value)">
+              ${PEOPLE.map(p => {
+                const current = String(task[3] || '').trim() || 'Unassigned';
+                return `<option value="${p}"${p === current ? ' selected' : ''}>${p}</option>`;
+              }).join('')}
+            </select>
 
             <button
               type="button"
@@ -833,33 +938,72 @@
         .map(item => {
           const details = [
             item[2] ? 'Planned ' + item[2] : '',
-            item[3] ? 'Needs: ' + item[3] : '',
             item[5] || 'Idea'
           ].filter(Boolean);
 
+          const id = escapeAttribute(item[0]);
+
           return `
-            <label class="check-row">
-              <input
-                type="checkbox"
-                onchange="completeMeal(
-                  '${escapeAttribute(item[0])}',
-                  this
-                )"
-              >
+            <div class="item meal-item">
+              <label class="check-row">
+                <input
+                  type="checkbox"
+                  onchange="completeMeal('${id}', this)"
+                >
 
-              <div>
-                <div class="item-title">
-                  ${escapeHtml(item[1])}
-                </div>
+                <div>
+                  <div class="item-title">
+                    ${escapeHtml(item[1])}
+                  </div>
 
-                <div class="item-details">
-                  ${escapeHtml(details.join(' · '))}
+                  <div class="item-details">
+                    ${escapeHtml(details.join(' · '))}
+                  </div>
                 </div>
+              </label>
+
+              <div class="meal-extra">
+                <input
+                  type="text"
+                  id="ing-${id}"
+                  placeholder="Ingredients, separated by commas"
+                  value="${escapeAttribute(item[3] || '')}"
+                >
+                <button type="button" onclick="addMealIngredients('${id}', this)">
+                  Add to shopping
+                </button>
               </div>
-            </label>
+            </div>
           `;
         })
         .join('');
+    }
+
+    function addMealIngredients(mealId, button) {
+      const input = document.getElementById('ing-' + mealId);
+      const text = input ? input.value.trim() : '';
+
+      if (!text) {
+        alert('Type the ingredients first, separated by commas.');
+        return;
+      }
+
+      const addedBy = (document.getElementById('addedBy') || {}).value || 'Unspecified';
+      button.disabled = true;
+      button.textContent = 'Adding…';
+
+      callPost('addMealIngredients', { mealId, ingredients: text, addedBy })
+        .then(result => {
+          button.textContent = result.message || 'Added';
+          return loadDashboard(true);
+        })
+        .catch(error => {
+          button.disabled = false;
+          button.textContent = 'Add to shopping';
+          if (!error.unauthorized) {
+            alert(getErrorMessage(error, 'Unable to add the ingredients.'));
+          }
+        });
     }
 
     function completeDiscussion(discussionId, checkbox) {
