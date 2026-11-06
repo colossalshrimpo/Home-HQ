@@ -2,6 +2,7 @@
 <html>
 <head>
   <meta charset="utf-8">
+  <title>Household HQ</title>
   <base target="_top">
 
   <link rel="preconnect" href="https://script.google.com">
@@ -348,12 +349,22 @@
       max-width:340px; width:100%; text-align:center; box-shadow:0 8px 30px rgba(0,0,0,.3); }
     #lockScreen input { width:100%; box-sizing:border-box; margin:12px 0 8px; }
     #lockError { color:#c0392b; font-size:.85rem; min-height:1.2em; }
+    #connectScreen { position:fixed; inset:0; z-index:9998; display:none; align-items:center;
+      justify-content:center; background:rgba(31,42,51,.75); padding:16px; }
+    #connectScreen.show { display:flex; }
+    #connectScreen .lock-box { background:#fff; color:var(--text-main); padding:24px; border-radius:16px;
+      max-width:420px; width:100%; box-shadow:0 8px 30px rgba(0,0,0,.3); }
+    #connectScreen input { width:100%; box-sizing:border-box; margin:12px 0 8px; }
+    #connectError { color:#c0392b; font-size:.85rem; min-height:1.2em; }
+    .linkish { background:none; border:none; color:var(--blue-dark); text-decoration:underline;
+      width:auto; padding:4px; margin:0; font-size:.85rem; box-shadow:none; }
+    .footer-row { text-align:center; margin:16px 0 40px; color:var(--text-sub); }
   </style>
 </head>
 
 <body>
   <div class="container">
-    <h1>Household HQ</h1>
+    <h1 id="householdTitle">Household HQ</h1>
 
     <p class="subtitle">
       Tasks, shopping, and household thoughts in one place.
@@ -373,9 +384,8 @@
     placeholder="What should we remember?"
   ></textarea>
 
-  <select id="addedBy">
-    <option value="Joshua">Joshua</option>
-    <option value="Alex">Alex</option>
+  <select id="addedBy" aria-label="Who is adding this?" onchange="rememberWho(this.value)">
+    <option value="">Loading…</option>
   </select>
 
   <label class="checkbox-row">
@@ -532,9 +542,100 @@
   </form>
 </div>
 
+<div id="connectScreen" role="dialog" aria-modal="true" aria-labelledby="connectTitle">
+  <form class="lock-box" onsubmit="return submitConnect(event)">
+    <h2 id="connectTitle">Connect your household</h2>
+    <p>Paste the web app link from your Household HQ spreadsheet
+      (Apps Script &gt; Deploy &gt; Manage deployments &gt; Web app URL).</p>
+    <input type="url" id="connectInput" placeholder="https://script.google.com/macros/s/.../exec" autocomplete="off">
+    <div id="connectError"></div>
+    <button type="submit">Connect</button>
+  </form>
+</div>
+
+<div class="footer-row">
+  <button type="button" class="linkish" onclick="switchHousehold()">Switch household</button>
+</div>
+
   <script>
-    // Paste your Apps Script Web App /exec URL here after deploying WebApi.gs:
-    const APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbyb7Qv3YKBswD1DkFSXmFjiXDC5UuOaRzfxK91kWRDvS3CJPdvY8uS5-PUnMjDPEYh1/exec';
+    // ---- Which household? ---------------------------------------------
+    // The web app link is entered once per device (or arrives in the page
+    // address as #api=<link>) and is remembered here.
+    function getApiUrl() {
+      try { return localStorage.getItem('hhq_url') || ''; } catch (e) { return ''; }
+    }
+
+    function isValidApiUrl(value) {
+      return /^https:\/\/script\.google\.com\/(a\/macros\/[^\/]+\/|macros\/)s\/[A-Za-z0-9_-]+\/exec$/
+        .test(String(value || '').trim());
+    }
+
+    function saveApiUrl(value) {
+      try {
+        localStorage.setItem('hhq_url', value.trim());
+        return true;
+      } catch (e) {
+        return false;
+      }
+    }
+
+    function readLinkApi() {
+      const match = location.hash.match(/[#&]api=([^&]+)/);
+      if (!match) return;
+
+      try {
+        const value = decodeURIComponent(match[1]);
+        if (isValidApiUrl(value)) {
+          saveApiUrl(value);
+          history.replaceState(null, '', location.pathname + location.search);
+        }
+      } catch (e) {
+        // Ignore a malformed link.
+      }
+    }
+
+    function showConnectScreen() {
+      const screen = document.getElementById('connectScreen');
+      if (!screen) return;
+      screen.classList.add('show');
+      document.getElementById('connectError').textContent = '';
+      setTimeout(() => document.getElementById('connectInput').focus(), 50);
+    }
+
+    function submitConnect(event) {
+      event.preventDefault();
+      const value = document.getElementById('connectInput').value.trim();
+
+      if (!isValidApiUrl(value)) {
+        document.getElementById('connectError').textContent =
+          'That does not look like a web app link. It should start with https://script.google.com/ and end in /exec.';
+        return false;
+      }
+
+      saveApiUrl(value);
+      dashboardState = null;
+      document.getElementById('connectScreen').classList.remove('show');
+      loadDashboard(true);
+      return false;
+    }
+
+    function switchHousehold() {
+      if (!confirm('Connect this device to a different household?')) return;
+
+      try {
+        localStorage.removeItem('hhq_url');
+        localStorage.removeItem('hhq_key');
+        localStorage.removeItem(CACHE_KEY);
+      } catch (e) {}
+
+      dashboardState = null;
+      showConnectScreen();
+    }
+
+    // The person using this device (remembered for Quick Add).
+    function rememberWho(value) {
+      try { localStorage.setItem('hhq_me', value); } catch (e) {}
+    }
 
     // ---- Passcode ----------------------------------------------------
     function getKey() {
@@ -579,7 +680,16 @@
 
     function callPost(action, params) {
       // text/plain avoids a CORS preflight; the body itself is still JSON.
-      return fetch(APPS_SCRIPT_URL, {
+      const apiUrl = getApiUrl();
+
+      if (!apiUrl) {
+        showConnectScreen();
+        const error = new Error('Connect your household first.');
+        error.unauthorized = true;
+        return Promise.reject(error);
+      }
+
+      return fetch(apiUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'text/plain;charset=utf-8' },
         body: JSON.stringify({ action, params, key: getKey() })
@@ -597,7 +707,7 @@
       try {
         const raw = localStorage.getItem(CACHE_KEY);
         const saved = raw ? JSON.parse(raw) : null;
-        return saved && saved.data ? saved : null;
+        return saved && saved.data && saved.url === getApiUrl() ? saved : null;
       } catch (error) {
         return null;
       }
@@ -607,7 +717,7 @@
       try {
         localStorage.setItem(
           CACHE_KEY,
-          JSON.stringify({ savedAt: Date.now(), data: dashboardState })
+          JSON.stringify({ savedAt: Date.now(), url: getApiUrl(), data: dashboardState })
         );
       } catch (error) {
         // Storage can be unavailable (private window); the page still works.
@@ -627,6 +737,14 @@
     }
 
     function initDashboard() {
+      readLinkApi();
+
+      if (!getApiUrl()) {
+        setSyncStatus('Not connected');
+        showConnectScreen();
+        return;
+      }
+
       const saved = readSavedDashboard();
 
       if (saved) {
@@ -715,7 +833,42 @@
         });
     }
 
+    function getAssignees() {
+      const config = dashboardState && dashboardState.config;
+      return (config && config.assignees) || ['Unassigned', 'Both'];
+    }
+
+    function getPeopleNames() {
+      const config = dashboardState && dashboardState.config;
+      return (config && config.people) || [];
+    }
+
+    function renderConfig(config) {
+      if (!config) return;
+
+      const title = config.household || 'Household HQ';
+      const heading = document.getElementById('householdTitle');
+      if (heading) heading.textContent = title;
+      document.title = title;
+
+      const select = document.getElementById('addedBy');
+      if (!select) return;
+
+      const people = config.people || [];
+      let remembered = '';
+      try { remembered = localStorage.getItem('hhq_me') || ''; } catch (e) {}
+
+      const current = select.value || remembered;
+      select.innerHTML = people
+        .map(name => '<option value="' + escapeAttribute(name) + '">' +
+          escapeHtml(name) + '</option>')
+        .join('') || '<option value="Unspecified">Unspecified</option>';
+
+      if (people.indexOf(current) !== -1) select.value = current;
+    }
+
     function renderDashboard(data) {
+      renderConfig(data.config);
       renderTasks(data.tasks || []);
       renderShopping(data.shopping || []);
       renderDiscussions(data.discussions || []);
@@ -724,7 +877,6 @@
       renderInbox(data.inbox || []);
     }
 
-    const PEOPLE = ['Unassigned', 'Alex', 'Joshua', 'Both'];
 
     function getTaskFilter() {
       try { return localStorage.getItem('hhq_task_filter') || 'Everyone'; }
@@ -761,7 +913,11 @@
       const container =
         document.getElementById('tasks');
 
-      const filter = getTaskFilter();
+      let filter = getTaskFilter();
+      if (filter !== 'Everyone' && filter !== 'Unassigned' &&
+          getPeopleNames().indexOf(filter) === -1) {
+        filter = 'Everyone';
+      }
 
       const allOpen = tasks.filter(task => {
         const status = task[5];
@@ -775,7 +931,7 @@
       const openTasks = allOpen.filter(task => taskMatchesFilter(task, filter));
 
       const chips = '<div class="chips">' +
-        ['Everyone', 'Alex', 'Joshua', 'Unassigned']
+        ['Everyone'].concat(getPeopleNames(), ['Unassigned'])
           .map(name => `<button type="button" class="chip${name === filter ? ' active' : ''}"
             onclick="setTaskFilter('${name}')">${name}</button>`)
           .join('') +
@@ -803,7 +959,7 @@
 
             <select class="assign-select" aria-label="Assigned to"
               onchange="changeAssignee('${escapeAttribute(task[0])}', this.value)">
-              ${PEOPLE.map(p => {
+              ${getAssignees().map(p => {
                 const current = String(task[3] || '').trim() || 'Unassigned';
                 return `<option value="${p}"${p === current ? ' selected' : ''}>${p}</option>`;
               }).join('')}
@@ -867,7 +1023,7 @@
       ['resolved', 'discussed', 'completed', 'dismissed'];
 
     const CLOSED_MEAL_STATUSES =
-      ['completed', 'cooked', 'done', 'dismissed'];
+      ['completed', 'cooked', 'done', 'dismissed', 'prepared', 'skipped'];
 
     // Discussions columns: ID, Topic, Added by, Date added, Status,
     // Decision/Notes, Parent Inbox ID
@@ -1029,11 +1185,11 @@
       optimisticChange(
         state => {
           const row = (state.meals || []).find(r => r[0] === mealId);
-          if (row) row[5] = 'Completed';
+          if (row) row[5] = 'Prepared';
         },
         state => renderMeals(state.meals || []),
         'updateMealStatus',
-        { mealId, status: 'Completed' },
+        { mealId, status: 'Prepared' },
         'Unable to update the meal.'
       );
     }
